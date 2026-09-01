@@ -6,7 +6,7 @@ local osd_duration = 1200
 function descriptor()
     return {
         title = "Timestamp writer",
-        version = "0.0.1",
+        version = "0.0.2",
         author = "Nandhakumar Subramanian",
         shortdesc = "Timestamp writer",
         description = "VLC Extension to mark start and end timestamps of a video to export as clips in mkvtoolnix",
@@ -60,7 +60,7 @@ local function end_segment()
     start_time_ms = nil
     
     local segment_count = #log_entries:gsub("[^%+]","") 
-    segment_dialog:add_label(string.format("Segment #%d Logged:\n%s - %s\nReady for next segment or click 'Save Log'.", segment_count, formatted_start, formatted_end))
+    segment_dialog:add_label(string.format([[Segment #%d Logged: %s - %s.]], segment_count, formatted_start, formatted_end))
 end
 
 local function save_log_file()
