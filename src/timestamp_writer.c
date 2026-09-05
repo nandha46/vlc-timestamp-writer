@@ -385,14 +385,39 @@ static int ActionSaveLog(vlc_object_t *p_this, char const *psz_var,
     else if (psz_content[0] == ',')
         psz_content += 1;
 
+    /* Calculate total duration and segment count from psz_log_entries */
+    int64_t i_total_duration_us = 0;
+    int i_segment_count = 0;
+    const char *p = p_sys->psz_log_entries;
+    while ((p = strstr(p, ",+")) != NULL)
+    {
+        p += 2; /* Skip ",+" */
+        int sh = 0, sm = 0, ss = 0, sms = 0;
+        int eh = 0, em = 0, es = 0, ems = 0;
+        if (sscanf(p, "%d:%d:%d.%d-%d:%d:%d.%d", &sh, &sm, &ss, &sms, &eh, &em, &es, &ems) == 8)
+        {
+            int64_t seg_start_us = ((int64_t)sh * 3600 + sm * 60 + ss) * 1000000 + (int64_t)sms * 1000;
+            int64_t seg_end_us   = ((int64_t)eh * 3600 + em * 60 + es) * 1000000 + (int64_t)ems * 1000;
+            if (seg_end_us > seg_start_us)
+                i_total_duration_us += (seg_end_us - seg_start_us);
+            i_segment_count++;
+        }
+    }
+
+    char sz_duration[32];
+    FormatTime(i_total_duration_us, sz_duration, sizeof(sz_duration));
+
     FILE *f = vlc_fopen(sz_output_path, "w");
     if (f)
     {
         fputs(psz_content, f);
         fclose(f);
 
-        ShowOSD(p_intf, p_input, "Log saved successfully!");
-        msg_Info(p_intf, "Timestamp Writer: Log saved to %s", sz_output_path);
+        char sz_osd[128];
+        snprintf(sz_osd, sizeof(sz_osd), "Log Saved! (%d segments, Total: %s)", i_segment_count, sz_duration);
+        ShowOSD(p_intf, p_input, sz_osd);
+        msg_Info(p_intf, "Timestamp Writer: Log saved to %s (Segments: %d, Total Duration: %s)",
+                 sz_output_path, i_segment_count, sz_duration);
 
         /* Reset entries */
         p_sys->psz_log_entries[0] = '\0';

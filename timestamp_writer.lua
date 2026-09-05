@@ -103,6 +103,26 @@ local function end_segment()
     end
 end
 
+local function parse_time_to_ms(time_str)
+    local h, m, s, ms = time_str:match("(%d+):(%d+):(%d+)%.(%d+)")
+    if h and m and s and ms then
+        return (tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)) * 1000 + tonumber(ms)
+    end
+    return 0
+end
+
+local function calculate_total_duration_ms(entries)
+    local total_ms = 0
+    for start_str, end_str in entries:gmatch("%+([%d:%.]+)%-([%d:%.]+)") do
+        local seg_start = parse_time_to_ms(start_str)
+        local seg_end = parse_time_to_ms(end_str)
+        if seg_end > seg_start then
+            total_ms = total_ms + (seg_end - seg_start)
+        end
+    end
+    return total_ms
+end
+
 local function save_log_file()
     if log_entries == "" then
 		segment_dialog:add_label("No segments logged yet.")
@@ -133,6 +153,10 @@ local function save_log_file()
     local base_filename = filename:match("(.+)%.[^%.]+$") or filename
     local output_path = directory .. base_filename .. ".txt"
     
+    local total_duration_ms = calculate_total_duration_ms(log_entries)
+    local formatted_duration = format_time(total_duration_ms)
+    local segment_count = #log_entries:gsub("[^%+]","") 
+
     local file = io.open(output_path, "w")
     
     if file then
@@ -140,6 +164,7 @@ local function save_log_file()
         file:write(final_output)
         file:close()
 		segment_dialog:add_label("Log Saved.")
+        vlc.osd.message("Log Saved! (" .. segment_count .. " segments, Total: " .. formatted_duration .. ")", osd_duration * 2)
     else
         vlc.messages.log(vlc.messages.ERROR, "Could not open file for writing: " .. output_path)
     end
@@ -149,7 +174,7 @@ local function save_log_file()
     last_segment_start_ms = nil
     last_segment_end_ms = nil
     
-    segment_dialog:add_label("Log saved successfully! Ready to start new log.")
+    segment_dialog:add_label(string.format("Log saved successfully! Segments: %d | Total Duration: %s", segment_count, formatted_duration))
 end
 
 function activate()
