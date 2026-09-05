@@ -27,6 +27,32 @@ end
 
 local last_segment_start_ms = nil
 local last_segment_end_ms = nil
+local status_label = nil
+local history_label = nil
+local segment_list = nil
+
+local function refresh_list()
+    if not segment_list then return end
+    segment_list:clear()
+    
+    local count = 1
+    for start_str, end_str in log_entries:gmatch("%+([%d:%.]+)%-([%d:%.]+)") do
+        segment_list:add_value(string.format("Segment #%d: %s ➔ %s", count, start_str, end_str), count)
+        count = count + 1
+    end
+end
+
+local function update_status(html_text)
+    if status_label then
+        status_label:set_text([[<span style="font-size: 13px;">]] .. html_text .. [[</span><br>]])
+    end
+end
+
+local function update_history(html_text)
+    if history_label then
+        history_label:set_text([[<span style="font-size: 13px;">]] .. html_text .. [[</span><br><br>]])
+    end
+end
 
 local function start_segment()
 	local input_object = vlc.object.input()
@@ -35,10 +61,10 @@ local function start_segment()
     local formatted_time = format_time(start_time_ms)
 	
     if last_segment_start_ms ~= nil and last_segment_end_ms == nil then
-        segment_dialog:add_label("START updated: " .. formatted_time .. "\n")
+        update_status(string.format([[<b>Status:</b> <span style="color: #27ae60;">🔄 Start Updated:</span> <b>%s</b>]], formatted_time))
         vlc.osd.message("START (Updated): " .. formatted_time .. "\n", osd_duration)
     else
-        segment_dialog:add_label("START: " .. formatted_time .. "\n")
+        update_status(string.format([[<b>Status:</b> <span style="color: #27ae60;">🟢 Start Marked:</span> <b>%s</b>]], formatted_time))
         vlc.osd.message("START: " .. formatted_time .. "\n", osd_duration)
     end
 
@@ -54,7 +80,7 @@ local function end_segment()
     -- Case 1: Start segment is currently active (normal end segment or initial completion)
     if start_time_ms ~= nil then
         if current_end_ms < start_time_ms then
-            segment_dialog:add_label("ERROR: End time is before Start time!")
+            update_status([[<b>Status:</b> <span style="color: #e74c3c;">⚠️ ERROR: End time is before Start time!</span>]])
             return
         end
 
@@ -64,17 +90,19 @@ local function end_segment()
         vlc.osd.message("END: " .. formatted_end .. "\n", osd_duration)
 
         log_entries = log_entries .. ",+" .. formatted_start .. "-" .. formatted_end
+        refresh_list()
         
         last_segment_start_ms = start_time_ms
         last_segment_end_ms = current_end_ms
         start_time_ms = nil
         
         local segment_count = #log_entries:gsub("[^%+]","") 
-        segment_dialog:add_label(string.format([[Segment #%d Logged: %s - %s.]], segment_count, formatted_start, formatted_end))
+        update_status(string.format([[<b>Status:</b> <span style="color: #2980b9;">✅ Segment #%d Logged</span>]], segment_count))
+        update_history(string.format([[<b>Last Segment:</b> %s ➔ %s]], formatted_start, formatted_end))
     -- Case 2: No active start segment, but we already have a logged segment -> replace last segment's end time
     elseif last_segment_start_ms ~= nil and last_segment_end_ms ~= nil then
         if current_end_ms < last_segment_start_ms then
-            segment_dialog:add_label("ERROR: End time is before Start time!")
+            update_status([[<b>Status:</b> <span style="color: #e74c3c;">⚠️ ERROR: End time is before Start time!</span>]])
             return
         end
 
@@ -91,14 +119,16 @@ local function end_segment()
             -- Fallback: match whatever last segment is at the end of log_entries
             log_entries = log_entries:gsub(",%+" .. formatted_start:gsub("%-", "%%-") .. "%-[^,]+$", ",+" .. formatted_start .. "-" .. formatted_new_end)
         end
+        refresh_list()
 
         last_segment_end_ms = current_end_ms
         vlc.osd.message("END (Updated): " .. formatted_new_end .. "\n", osd_duration)
 
         local segment_count = #log_entries:gsub("[^%+]","") 
-        segment_dialog:add_label(string.format([[Segment #%d End Updated: %s - %s.]], segment_count, formatted_start, formatted_new_end))
+        update_status(string.format([[<b>Status:</b> <span style="color: #e67e22;">🔄 Segment #%d End Updated</span>]], segment_count))
+        update_history(string.format([[<b>Last Segment:</b> %s ➔ %s]], formatted_start, formatted_new_end))
     else
-        segment_dialog:add_label("ERROR: Click 'Start Segment' first!")
+        update_status([[<b>Status:</b> <span style="color: #e74c3c;">⚠️ ERROR: Click 'Start Segment' first!</span>]])
         return
     end
 end
@@ -125,14 +155,14 @@ end
 
 local function save_log_file()
     if log_entries == "" then
-		segment_dialog:add_label("No segments logged yet.")
+		update_status([[<b>Status:</b> <span style="color: #7f8c8d;">No segments logged yet.</span>]])
         return
     end
     
     local media_uri = vlc.input.item():uri()
     
     if not media_uri or media_uri == "" or media_uri:sub(1, 4) ~= "file" then
-        segment_dialog:add_label("Error: Must play a local file to save log.")
+        update_status([[<b>Status:</b> <span style="color: #e74c3c;">⚠️ Error: Must play a local file to save.</span>]])
         return
     end
 
@@ -163,50 +193,59 @@ local function save_log_file()
         local final_output = log_entries:sub(3) 
         file:write(final_output)
         file:close()
-		segment_dialog:add_label("Log Saved.")
         vlc.osd.message("Log Saved! (" .. segment_count .. " segments, Total: " .. formatted_duration .. ")", osd_duration * 2)
+        update_status(string.format([[<b>Status:</b> <span style="color: #27ae60;">💾 Saved!</span> <b>%d</b> segments (<b>%s</b>)]], segment_count, formatted_duration))
+        update_history([[<b>Saved to:</b> ]] .. base_filename .. ".txt")
     else
         vlc.messages.log(vlc.messages.ERROR, "Could not open file for writing: " .. output_path)
+        update_status([[<b>Status:</b> <span style="color: #e74c3c;">⚠️ Could not write file.</span>]])
     end
     
     log_entries = ""
     start_time_ms = nil
     last_segment_start_ms = nil
     last_segment_end_ms = nil
-    
-    segment_dialog:add_label(string.format("Log saved successfully! Segments: %d | Total Duration: %s", segment_count, formatted_duration))
+    refresh_list()
 end
 
 function activate()
-    segment_dialog = vlc.dialog("Segment Logger")
+    segment_dialog = vlc.dialog("Timestamp Writer")
     
-	segment_dialog:add_label("Ready. Click 'Start Segment' to begin marking a clip.")
-	segment_dialog:add_button("Start Segment", start_segment)
-	segment_dialog:add_button("End Segment", end_segment)
-    segment_dialog:add_label("---")
-    segment_dialog:add_button("Save Log and Reset", save_log_file)
-    segment_dialog:show(segment_dialog)
-	
-	vlc.keypressed("s", "Start Segment Mark", start_segment, 
-        vlc.key_modifier.Shift, 
-        vlc.key_action.Press)
+    -- Row 1: Header Banner (spans full width, sets a generous minimum width using HTML table)
+    segment_dialog:add_label([[<table width="450"><tr><td><br><span style="font-size: 15px; font-weight: bold; color: #2c3e50;">🎬 MKVToolNix Segment Writer</span><br></td></tr></table>]], 1, 1, 2, 1)
 
-    vlc.keypressed("e", "End Segment Mark", end_segment, 
-        vlc.key_modifier.Shift, 
-        vlc.key_action.Press)
+    -- Row 2: Status Line
+    status_label = segment_dialog:add_label([[<span style="font-size: 13px;"><b>Status:</b> <span style="color: #7f8c8d;">Ready to mark clips</span></span><br>]], 1, 2, 2, 1)
+
+    -- Row 3: History / Last segment preview
+    history_label = segment_dialog:add_label([[<span style="font-size: 13px;"><b>Last Segment:</b> <i>None</i></span><br><br>]], 1, 3, 2, 1)
+
+    -- Row 4: Grid Action Buttons: Start (Col 1) and End (Col 2)
+    segment_dialog:add_button("🟢 ▶ Start Segment", start_segment, 1, 4, 1, 1)
+    segment_dialog:add_button("🔴 ⏹ End Segment", end_segment, 2, 4, 1, 1)
+
+    -- Row 5: Segment List
+    segment_list = segment_dialog:add_list(1, 5, 2, 1)
+
+    -- Row 6: Separator with vertical breathing room
+    segment_dialog:add_label([[<br><hr width="450" color="#d0d7de" /><br>]], 1, 6, 2, 1)
+
+    -- Row 7: Save and Reset button (spans both columns)
+    segment_dialog:add_button("💾 Save Log & Reset", save_log_file, 1, 7, 2, 1)
+
+    segment_dialog:show(segment_dialog)
 end
 
 function deactivate()
     if segment_dialog then
         vlc.dialog.hide(segment_dialog)
         segment_dialog = nil
+        status_label = nil
+        history_label = nil
+        segment_list = nil
         start_time_ms = nil
         last_segment_start_ms = nil
         last_segment_end_ms = nil
         log_entries = ""
     end
-	
-	vlc.delete_key("Start Segment Mark")
-    vlc.delete_key("End Segment Mark")
-	
 end
