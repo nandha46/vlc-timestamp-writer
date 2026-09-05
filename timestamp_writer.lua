@@ -25,42 +25,82 @@ local function format_time(time_ms)
     return string.format("%02d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds)
 end
 
+local last_segment_start_ms = nil
+local last_segment_end_ms = nil
+
 local function start_segment()
 	local input_object = vlc.object.input()
 	local current_time_microseconds = vlc.var.get(input_object, "time")
 	start_time_ms = current_time_microseconds / 1000	
     local formatted_time = format_time(start_time_ms)
-	segment_dialog:add_label("START:" .. formatted_time .. "\n")
 	
-	vlc.osd.message("START:" .. formatted_time .. "\n", osd_duration)
+    if last_segment_start_ms ~= nil and last_segment_end_ms == nil then
+        segment_dialog:add_label("START updated: " .. formatted_time .. "\n")
+        vlc.osd.message("START (Updated): " .. formatted_time .. "\n", osd_duration)
+    else
+        segment_dialog:add_label("START: " .. formatted_time .. "\n")
+        vlc.osd.message("START: " .. formatted_time .. "\n", osd_duration)
+    end
+
+    last_segment_start_ms = start_time_ms
+    last_segment_end_ms = nil
 end
 
 local function end_segment()
-    if start_time_ms == nil then
+    local input_object = vlc.object.input()
+    local current_time_microseconds = vlc.var.get(input_object, "time")
+    local current_end_ms = current_time_microseconds / 1000
+
+    -- Case 1: Start segment is currently active (normal end segment or initial completion)
+    if start_time_ms ~= nil then
+        if current_end_ms < start_time_ms then
+            segment_dialog:add_label("ERROR: End time is before Start time!")
+            return
+        end
+
+        local formatted_start = format_time(start_time_ms)
+        local formatted_end = format_time(current_end_ms)
+        
+        vlc.osd.message("END: " .. formatted_end .. "\n", osd_duration)
+
+        log_entries = log_entries .. ",+" .. formatted_start .. "-" .. formatted_end
+        
+        last_segment_start_ms = start_time_ms
+        last_segment_end_ms = current_end_ms
+        start_time_ms = nil
+        
+        local segment_count = #log_entries:gsub("[^%+]","") 
+        segment_dialog:add_label(string.format([[Segment #%d Logged: %s - %s.]], segment_count, formatted_start, formatted_end))
+    -- Case 2: No active start segment, but we already have a logged segment -> replace last segment's end time
+    elseif last_segment_start_ms ~= nil and last_segment_end_ms ~= nil then
+        if current_end_ms < last_segment_start_ms then
+            segment_dialog:add_label("ERROR: End time is before Start time!")
+            return
+        end
+
+        local formatted_start = format_time(last_segment_start_ms)
+        local formatted_old_end = format_time(last_segment_end_ms)
+        local formatted_new_end = format_time(current_end_ms)
+
+        -- Replace the last logged segment entry ",+<start>-<old_end>" with ",+<start>-<new_end>"
+        local pattern = ",%+" .. formatted_start:gsub("%-", "%%-") .. "%-" .. formatted_old_end:gsub("%-", "%%-") .. "$"
+        local updated_log, count = log_entries:gsub(pattern, ",+" .. formatted_start .. "-" .. formatted_new_end)
+        if count > 0 then
+            log_entries = updated_log
+        else
+            -- Fallback: match whatever last segment is at the end of log_entries
+            log_entries = log_entries:gsub(",%+" .. formatted_start:gsub("%-", "%%-") .. "%-[^,]+$", ",+" .. formatted_start .. "-" .. formatted_new_end)
+        end
+
+        last_segment_end_ms = current_end_ms
+        vlc.osd.message("END (Updated): " .. formatted_new_end .. "\n", osd_duration)
+
+        local segment_count = #log_entries:gsub("[^%+]","") 
+        segment_dialog:add_label(string.format([[Segment #%d End Updated: %s - %s.]], segment_count, formatted_start, formatted_new_end))
+    else
         segment_dialog:add_label("ERROR: Click 'Start Segment' first!")
         return
     end
-    
-	local input_object = vlc.object.input()
-	local current_time_microseconds = vlc.var.get(input_object, "time")
-	local end_time_ms = current_time_microseconds / 1000
-    
-    if end_time_ms < start_time_ms then
-        segment_dialog:add_label("ERROR: End time is before Start time!")
-        return
-    end
-
-    local formatted_start = format_time(start_time_ms)
-    local formatted_end = format_time(end_time_ms)
-    
-	vlc.osd.message("END:"..formatted_end.."\n", osd_duration)
-
-    log_entries = log_entries .. ",+" .. formatted_start .. "-" .. formatted_end
-    
-    start_time_ms = nil
-    
-    local segment_count = #log_entries:gsub("[^%+]","") 
-    segment_dialog:add_label(string.format([[Segment #%d Logged: %s - %s.]], segment_count, formatted_start, formatted_end))
 end
 
 local function save_log_file()
@@ -106,6 +146,8 @@ local function save_log_file()
     
     log_entries = ""
     start_time_ms = nil
+    last_segment_start_ms = nil
+    last_segment_end_ms = nil
     
     segment_dialog:add_label("Log saved successfully! Ready to start new log.")
 end
@@ -134,6 +176,8 @@ function deactivate()
         vlc.dialog.hide(segment_dialog)
         segment_dialog = nil
         start_time_ms = nil
+        last_segment_start_ms = nil
+        last_segment_end_ms = nil
         log_entries = ""
     end
 	

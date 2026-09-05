@@ -56,8 +56,10 @@ vlc_module_end()
 struct intf_sys_t
 {
     vlc_mutex_t lock;
-    int64_t     i_start_time_us; /* Start timestamp in microseconds (-1 if unset) */
-    char       *psz_log_entries; /* Accumulated MKVToolNix split entries */
+    int64_t     i_start_time_us;      /* Active start timestamp in microseconds (-1 if unset) */
+    int64_t     i_last_start_time_us; /* Last segment start timestamp in microseconds (-1 if unset) */
+    int64_t     i_last_end_time_us;   /* Last segment end timestamp in microseconds (-1 if unset) */
+    char       *psz_log_entries;      /* Accumulated MKVToolNix split entries */
 };
 
 /*****************************************************************************
@@ -101,6 +103,8 @@ static int Open(vlc_object_t *p_this)
 
     vlc_mutex_init(&p_sys->lock);
     p_sys->i_start_time_us = -1;
+    p_sys->i_last_start_time_us = -1;
+    p_sys->i_last_end_time_us = -1;
     p_sys->psz_log_entries = strdup("");
     if (!p_sys->psz_log_entries)
     {
@@ -167,14 +171,21 @@ static int ActionStartSegment(vlc_object_t *p_this, char const *psz_var,
     int64_t i_time_us = var_GetInteger(p_input, "time");
 
     vlc_mutex_lock(&p_sys->lock);
+    bool b_was_updated = (p_sys->i_start_time_us >= 0);
     p_sys->i_start_time_us = i_time_us;
+    p_sys->i_last_start_time_us = i_time_us;
+    p_sys->i_last_end_time_us = -1;
     vlc_mutex_unlock(&p_sys->lock);
 
     char sz_time[32];
     FormatTime(i_time_us, sz_time, sizeof(sz_time));
 
     char sz_osd[64];
-    snprintf(sz_osd, sizeof(sz_osd), "START: %s", sz_time);
+    if (b_was_updated)
+        snprintf(sz_osd, sizeof(sz_osd), "START (Updated): %s", sz_time);
+    else
+        snprintf(sz_osd, sizeof(sz_osd), "START: %s", sz_time);
+
     ShowOSD(p_intf, p_input, sz_osd);
 
     msg_Info(p_intf, "Timestamp Writer: Marked START at %s", sz_time);
@@ -200,8 +211,100 @@ static int ActionEndSegment(vlc_object_t *p_this, char const *psz_var,
         return VLC_EGENERIC;
     }
 
+    int64_t i_end_us = var_GetInteger(p_input, "time");
+
     vlc_mutex_lock(&p_sys->lock);
-    if (p_sys->i_start_time_us < 0)
+    /* Case 1: Start segment is currently active (new segment logged) */
+    if (p_sys->i_start_time_us >= 0)
+    {
+        int64_t i_start_us = p_sys->i_start_time_us;
+        if (i_end_us < i_start_us)
+        {
+            vlc_mutex_unlock(&p_sys->lock);
+            ShowOSD(p_intf, p_input, "ERROR: End time is before Start time!");
+            msg_Err(p_intf, "Timestamp Writer: End time is before Start time");
+            vlc_object_release(p_input);
+            return VLC_EGENERIC;
+        }
+
+        char sz_start[32], sz_end[32];
+        FormatTime(i_start_us, sz_start, sizeof(sz_start));
+        FormatTime(i_end_us, sz_end, sizeof(sz_end));
+
+        /* Append MKVToolNix format: ",+START-END" */
+        size_t new_len = strlen(p_sys->psz_log_entries) + strlen(sz_start) + strlen(sz_end) + 8;
+        char *psz_new_log = realloc(p_sys->psz_log_entries, new_len);
+        if (psz_new_log)
+        {
+            p_sys->psz_log_entries = psz_new_log;
+            strcat(p_sys->psz_log_entries, ",+");
+            strcat(p_sys->psz_log_entries, sz_start);
+            strcat(p_sys->psz_log_entries, "-");
+            strcat(p_sys->psz_log_entries, sz_end);
+        }
+
+        p_sys->i_last_start_time_us = i_start_us;
+        p_sys->i_last_end_time_us = i_end_us;
+        p_sys->i_start_time_us = -1; /* Reset start time */
+        vlc_mutex_unlock(&p_sys->lock);
+
+        char sz_osd[64];
+        snprintf(sz_osd, sizeof(sz_osd), "END: %s", sz_end);
+        ShowOSD(p_intf, p_input, sz_osd);
+
+        msg_Info(p_intf, "Timestamp Writer: Logged Segment %s - %s", sz_start, sz_end);
+        vlc_object_release(p_input);
+        return VLC_SUCCESS;
+    }
+    /* Case 2: Replace the last logged segment's end time */
+    else if (p_sys->i_last_start_time_us >= 0 && p_sys->i_last_end_time_us >= 0)
+    {
+        int64_t i_start_us = p_sys->i_last_start_time_us;
+        if (i_end_us < i_start_us)
+        {
+            vlc_mutex_unlock(&p_sys->lock);
+            ShowOSD(p_intf, p_input, "ERROR: End time is before Start time!");
+            msg_Err(p_intf, "Timestamp Writer: End time is before Start time");
+            vlc_object_release(p_input);
+            return VLC_EGENERIC;
+        }
+
+        char sz_start[32], sz_new_end[32];
+        FormatTime(i_start_us, sz_start, sizeof(sz_start));
+        FormatTime(i_end_us, sz_new_end, sizeof(sz_new_end));
+
+        /* Find last segment marker ",+" */
+        char *psz_last_seg = strrstr(p_sys->psz_log_entries, ",+");
+        if (!psz_last_seg && strncmp(p_sys->psz_log_entries, ",+", 2) == 0)
+            psz_last_seg = p_sys->psz_log_entries;
+
+        if (psz_last_seg)
+        {
+            *psz_last_seg = '\0';
+            size_t new_len = strlen(p_sys->psz_log_entries) + strlen(sz_start) + strlen(sz_new_end) + 8;
+            char *psz_new_log = realloc(p_sys->psz_log_entries, new_len);
+            if (psz_new_log)
+            {
+                p_sys->psz_log_entries = psz_new_log;
+                strcat(p_sys->psz_log_entries, ",+");
+                strcat(p_sys->psz_log_entries, sz_start);
+                strcat(p_sys->psz_log_entries, "-");
+                strcat(p_sys->psz_log_entries, sz_new_end);
+            }
+        }
+
+        p_sys->i_last_end_time_us = i_end_us;
+        vlc_mutex_unlock(&p_sys->lock);
+
+        char sz_osd[64];
+        snprintf(sz_osd, sizeof(sz_osd), "END (Updated): %s", sz_new_end);
+        ShowOSD(p_intf, p_input, sz_osd);
+
+        msg_Info(p_intf, "Timestamp Writer: Updated Last Segment End %s - %s", sz_start, sz_new_end);
+        vlc_object_release(p_input);
+        return VLC_SUCCESS;
+    }
+    else
     {
         vlc_mutex_unlock(&p_sys->lock);
         ShowOSD(p_intf, p_input, "ERROR: Set Start Segment first!");
@@ -209,45 +312,6 @@ static int ActionEndSegment(vlc_object_t *p_this, char const *psz_var,
         vlc_object_release(p_input);
         return VLC_EGENERIC;
     }
-
-    int64_t i_start_us = p_sys->i_start_time_us;
-    int64_t i_end_us = var_GetInteger(p_input, "time");
-
-    if (i_end_us < i_start_us)
-    {
-        vlc_mutex_unlock(&p_sys->lock);
-        ShowOSD(p_intf, p_input, "ERROR: End time is before Start time!");
-        msg_Err(p_intf, "Timestamp Writer: End time is before Start time");
-        vlc_object_release(p_input);
-        return VLC_EGENERIC;
-    }
-
-    char sz_start[32], sz_end[32];
-    FormatTime(i_start_us, sz_start, sizeof(sz_start));
-    FormatTime(i_end_us, sz_end, sizeof(sz_end));
-
-    /* Append MKVToolNix format: ",+START-END" */
-    size_t new_len = strlen(p_sys->psz_log_entries) + strlen(sz_start) + strlen(sz_end) + 8;
-    char *psz_new_log = realloc(p_sys->psz_log_entries, new_len);
-    if (psz_new_log)
-    {
-        p_sys->psz_log_entries = psz_new_log;
-        strcat(p_sys->psz_log_entries, ",+");
-        strcat(p_sys->psz_log_entries, sz_start);
-        strcat(p_sys->psz_log_entries, "-");
-        strcat(p_sys->psz_log_entries, sz_end);
-    }
-
-    p_sys->i_start_time_us = -1; /* Reset start time */
-    vlc_mutex_unlock(&p_sys->lock);
-
-    char sz_osd[64];
-    snprintf(sz_osd, sizeof(sz_osd), "END: %s", sz_end);
-    ShowOSD(p_intf, p_input, sz_osd);
-
-    msg_Info(p_intf, "Timestamp Writer: Logged Segment %s - %s", sz_start, sz_end);
-    vlc_object_release(p_input);
-    return VLC_SUCCESS;
 }
 
 /*****************************************************************************
@@ -333,6 +397,8 @@ static int ActionSaveLog(vlc_object_t *p_this, char const *psz_var,
         /* Reset entries */
         p_sys->psz_log_entries[0] = '\0';
         p_sys->i_start_time_us = -1;
+        p_sys->i_last_start_time_us = -1;
+        p_sys->i_last_end_time_us = -1;
     }
     else
     {
